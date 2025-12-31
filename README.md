@@ -1,4 +1,4 @@
-# AI-Powered Information Retrieval System with Advanced RAG Pipeline
+# NVIDIA Earnings Intelligence Platform: Advanced Document Processing with Multi-Vector Storage Architecture
 
 A comprehensive Retrieval-Augmented Generation (RAG) system built for analyzing NVIDIA's quarterly financial reports over the past 5 years (2021-2025). This project demonstrates advanced document processing, multi-modal parsing strategies, and sophisticated vector storage implementations using Apache Airflow orchestration.
 
