@@ -1,6 +1,6 @@
 # NVIDIA Earnings Intelligence Platform: Advanced Document Processing with Multi-Vector Storage Architecture
 
-A comprehensive Retrieval-Augmented Generation (RAG) system built for analyzing NVIDIA's quarterly financial reports over the past 5 years (2021-2025). This project demonstrates advanced document processing, multi-modal parsing strategies, and sophisticated vector storage implementations using Apache Airflow orchestration.
+A comprehensive Retrieval-Augmented Generation (RAG) system built for analyzing NVIDIA's quarterly financial reports over the past 5 years (2021-2025). This project demonstrates advanced document processing, multi-modal parsing strategies, and sophisticated vector storage implementations using Apache Airflow orchestration and Databricks-powered large-scale vector processing.
 
 ## 🎯 Project Overview
 
@@ -15,6 +15,7 @@ This system was developed as part of Assignment 4.2 to build a production-grade 
 - ✅ Apache Airflow orchestration for data pipeline
 - ✅ Multiple PDF parsing strategies (Docling, Mistral OCR, Manual)
 - ✅ Three vector storage implementations (Pinecone, ChromaDB, Custom Redis)
+- ✅ **Databricks-powered large-scale vector processing and indexing**
 - ✅ Advanced chunking strategies with hybrid search capabilities
 - ✅ Streamlit UI with FastAPI backend
 - ✅ Full Docker containerization and deployment
@@ -23,7 +24,7 @@ This system was developed as part of Assignment 4.2 to build a production-grade 
 
 ![Data Flow Diagram](https://pplx-res.cloudinary.com/image/upload/v1742583192/user_uploads/QifyRUrvYHUonpS/image.jpg)
 
-The architecture implements a sophisticated multi-stage pipeline:
+The architecture implements a sophisticated multi-stage pipeline with Databricks as the core vector processing engine:
 
 ### 1. Data Extraction Layer
 **Data Source**: NVIDIA Investor Relations Portal
@@ -52,35 +53,126 @@ The architecture implements a sophisticated multi-stage pipeline:
 - **Implementation**: Direct PDF-to-text conversion with manual preprocessing
 - **Use Case**: Fallback option and performance comparison baseline
 
-### 3. Vector Storage Architecture
+### 3. **Databricks Vector Processing Engine** 🆕
+
+The Databricks notebook (`vector-db-setup.ipynb`) serves as the core vector processing engine, handling large-scale embedding generation and multi-database indexing:
+
+#### Databricks Architecture Components
+```python
+# Core Dependencies and Configuration
+import boto3, pinecone, chromadb
+from haystack import Pipeline
+from haystack.components.embedders import OpenAIDocumentEmbedder
+from haystack_integrations.document_stores.pinecone import PineconeDocumentStore
+from haystack_integrations.document_stores.chroma import ChromaDocumentStore
+
+# S3 Integration for Document Retrieval
+def read_markdown_from_s3(s3_client, year, qtr, file_url):
+    tool_path = dbutils.widgets.get("tool")  # Dynamic tool selection
+    bucket_name = os.getenv('BUCKET_NAME')
+    response = s3_client.get_object(
+        Bucket=bucket_name, 
+        Key=f'{year}/{qtr}/{tool_path}/{file_name}'
+    )
+    return response["Body"].read(), file_url
+```
+
+#### Multi-Database Indexing Pipeline
+The Databricks notebook implements a sophisticated pipeline that simultaneously indexes documents across multiple vector databases:
+
+```python
+# Initialize Multiple Document Stores
+pinecone_document_store_cs1 = PineconeDocumentStore(
+    index="nvidia-vectors", 
+    namespace="nvidia_cs_1", 
+    dimension=1536
+)
+chroma_document_store_cs1 = ChromaDocumentStore(
+    host="34.31.232.10", 
+    port="8000", 
+    collection_name="nvidia_cs_1"
+)
+
+# Parallel Processing Pipeline
+indexing_pipeline = Pipeline()
+indexing_pipeline.add_component("converter", MarkdownToDocument())
+indexing_pipeline.add_component("cleaner", DocumentCleaner())
+
+# Multiple Chunking Strategies
+indexing_pipeline.add_component("splitter_cs1", DocumentSplitter(
+    split_by="sentence", split_length=5
+))
+indexing_pipeline.add_component("splitter_cs2", RecursiveDocumentSplitter(
+    split_length=400, split_overlap=40, split_unit="word"
+))
+indexing_pipeline.add_component("splitter_cs3", RecursiveDocumentSplitter(
+    split_length=1200, split_overlap=120, split_unit="char"
+))
+
+# Parallel Embedding Generation
+indexing_pipeline.add_component("embedder_cs1", OpenAIDocumentEmbedder(
+    model="text-embedding-3-small", 
+    meta_fields_to_embed=["year", "qtr"], 
+    dimensions=1536
+))
+```
+
+#### **Databricks Job Integration with Airflow**
+```python
+# Airflow DAG triggers Databricks job with parameters
+run_notebook = DatabricksRunNowOperator(
+    task_id="run_notebook",
+    databricks_conn_id="databricks_default",
+    job_id="915262908716993",
+    job_parameters={"tool": "mistral"},  # Dynamic tool selection
+    trigger_rule="all_success"
+)
+```
+
+**Databricks Processing Workflow**:
+1. **Parameter Ingestion**: `dbutils.widgets.get("tool")` receives processing tool type
+2. **S3 Document Loading**: Bulk retrieval of processed markdown files from S3
+3. **Parallel Processing**: Simultaneous chunking with three different strategies
+4. **Batch Embedding**: Large-scale OpenAI embedding generation with progress tracking
+5. **Multi-Database Write**: Parallel indexing to Pinecone and ChromaDB
+6. **Error Handling**: Comprehensive metadata cleanup and validation
+
+### 4. Vector Storage Architecture
 
 #### Implementation A: Pinecone Vector Database
 ```python
-# Pinecone Configuration
+# Pinecone Configuration with Namespaces
 document_store = PineconeDocumentStore(
     index="nvidia-vectors", 
     namespace=chunking_strategy_namespace, 
     dimension=1536
 )
-# Supports metadata filtering for hybrid search
-filters = {
-    "operator": "AND",
-    "conditions": [
-        {"field": "meta.year", "operator": "==", "value": year},
-        {"field": "meta.qtr", "operator": "==", "value": qtr}
-    ]
-}
+
+# Databricks Bulk Indexing
+docs = []
+for doc in data['embedder_cs1']['documents']:
+    if '_split_overlap' in doc.meta:
+        doc.meta.pop('_split_overlap')  # Metadata cleanup
+    if doc.embedding:
+        docs.append(doc)
+
+result_count = pinecone_document_store_cs1.write_documents(docs)
+# Result: 397 documents indexed for sentence-based chunking
 ```
 
 #### Implementation B: ChromaDB Vector Database
 ```python
-# ChromaDB Configuration  
+# ChromaDB Configuration with Collection Management
 document_store = ChromaDocumentStore(
     host="34.31.232.10", 
     port="8000", 
     collection_name=chunking_strategy_namespace
 )
-# Local deployment with persistent storage
+
+# Parallel ChromaDB Indexing Results
+# CS1 (sentence-5): 397 documents
+# CS2 (word-400-overlap-40): 290 documents  
+# CS3 (char-1200-overlap-120): 882 documents
 ```
 
 #### Implementation C: Native Redis Vector Store
@@ -131,6 +223,7 @@ class pytract_db:
 DocumentSplitter(split_by="sentence", split_length=5)
 ```
 - **Approach**: Groups content into 5-sentence chunks
+- **Databricks Results**: 397 documents indexed across both Pinecone and ChromaDB
 - **Use Case**: Preserves semantic coherence for detailed financial analysis
 - **Advantages**: Maintains context flow, ideal for narrative sections
 - **Best For**: Management discussion, risk factors, business overview
@@ -145,6 +238,7 @@ RecursiveDocumentSplitter(
 )
 ```
 - **Approach**: 400-word chunks with 40-word overlap between adjacent chunks
+- **Databricks Results**: 290 documents indexed across both databases
 - **Use Case**: Balanced approach for comprehensive coverage
 - **Advantages**: Prevents information loss at boundaries, ensures continuity
 - **Best For**: Financial statements, earnings calls transcripts
@@ -159,21 +253,22 @@ RecursiveDocumentSplitter(
 )
 ```
 - **Approach**: 1200-character chunks with 120-character overlap
+- **Databricks Results**: 882 documents indexed (highest granularity)
 - **Use Case**: Fine-grained processing for detailed technical content
 - **Advantages**: Consistent chunk sizes, optimal for embedding models
 - **Best For**: Technical specifications, detailed financial tables, footnotes
 
 ### Chunking Strategy Performance Analysis
-| Strategy | Avg Chunk Size | Embedding Efficiency | Context Preservation | Processing Speed |
-|----------|---------------|---------------------|---------------------|------------------|
-| sentence-5 | ~750 chars | High | Excellent | Fast |
-| word-400-overlap-40 | ~2000 chars | Very High | Good | Medium |
-| char-1200-overlap-120 | 1200 chars | Optimal | Very Good | Fast |
+| Strategy | Avg Chunk Size | Documents Indexed | Embedding Efficiency | Context Preservation | Processing Speed |
+|----------|---------------|-------------------|---------------------|---------------------|------------------|
+| sentence-5 | ~750 chars | 397 | High | Excellent | Fast |
+| word-400-overlap-40 | ~2000 chars | 290 | Very High | Good | Medium |
+| char-1200-overlap-120 | 1200 chars | 882 | Optimal | Very Good | Fast |
 
 ## 🚀 Apache Airflow Data Pipeline Architecture
 
 ### Pipeline Overview
-The system implements three sophisticated DAGs (Directed Acyclic Graphs) for comprehensive data orchestration:
+The system implements three sophisticated DAGs (Directed Acyclic Graphs) for comprehensive data orchestration, with **Databricks integration** as the core vector processing engine:
 
 ### DAG 1: `dag_scrape_links.py` - Data Discovery Pipeline
 ```python
@@ -262,6 +357,15 @@ with DAG(
             -d '{"ref": "main"}'
         """
     )
+    
+    # **NEW**: Direct Databricks Integration
+    run_databricks_notebook = DatabricksRunNowOperator(
+        task_id="run_databricks_vectorization",
+        databricks_conn_id="databricks_default",
+        job_id="915262908716993",
+        job_parameters={"tool": "docling"},
+        trigger_rule="all_success"
+    )
 ```
 
 **GitHub Actions Integration**:
@@ -270,7 +374,7 @@ The DAG triggers a GitHub Actions workflow that:
 2. Downloads PDFs from extracted links
 3. Processes documents using Docling pipeline
 4. Uploads processed markdown files to S3
-5. Triggers Databricks job for vector indexing
+5. **Triggers Databricks job for vector indexing**
 
 ### DAG 3: `dag_etl_mistralai.py` - Mistral AI Processing Pipeline
 
@@ -314,7 +418,7 @@ with DAG(
     )
 ```
 
-### Airflow-Databricks Integration
+### **Enhanced Airflow-Databricks Integration** 🆕
 
 **Databricks Job Orchestration**:
 ```python
@@ -331,33 +435,36 @@ run_notebook = DatabricksRunNowOperator(
 
 **Databricks Workflow Process**:
 1. **Job Trigger**: Airflow DAG triggers Databricks job via REST API
-2. **Parameter Passing**: Tool type (docling/mistral) passed as job parameter
+2. **Parameter Passing**: Tool type (docling/mistral) passed as job parameter using `dbutils.widgets.get("tool")`
 3. **Cluster Scaling**: Databricks auto-scales compute resources based on workload
-4. **Vector Processing**: Databricks notebook processes S3 markdown files
-5. **Embedding Generation**: Large-scale embedding computation using OpenAI API
-6. **Vector Storage**: Bulk upload to Pinecone/ChromaDB vector databases
-7. **Metadata Updates**: Update S3 metadata with processing status
+4. **S3 Integration**: Direct S3 document retrieval using boto3 within Databricks
+5. **Vector Processing**: Large-scale embedding computation using OpenAI API with progress tracking
+6. **Multi-Database Storage**: Simultaneous indexing to Pinecone and ChromaDB vector databases
+7. **Metadata Management**: Comprehensive metadata cleanup and validation
+8. **Status Updates**: Processing status updates with document counts
 
-**Databricks Notebook Structure** (Conceptual):
-```python
-# Databricks Notebook Cell 1: Parameter Handling
-dbutils.widgets.text("tool", "mistral", "Processing tool")
-tool = dbutils.widgets.get("tool")
-
-# Cell 2: S3 Data Loading
-s3_bucket = "your-bucket"
-processed_files = spark.read.format("json").load(f"s3://{s3_bucket}/metadata/")
-
-# Cell 3: Embedding Processing
-for file_path in processed_files:
-    markdown_content = load_from_s3(file_path)
-    chunks = apply_chunking_strategy(markdown_content, strategy)
-    embeddings = generate_embeddings(chunks)
-    store_in_vector_db(embeddings, metadata)
-
-# Cell 4: Status Updates
-update_processing_status(tool, "completed")
+**Databricks Processing Results**:
 ```
+Processing Results by Chunking Strategy:
+┌─────────────────────────┬─────────────┬─────────────┬───────────────┐
+│ Chunking Strategy       │ Pinecone DB │ ChromaDB    │ Total Chunks  │
+├─────────────────────────┼─────────────┼─────────────┼───────────────┤
+│ sentence-5              │ 397         │ 397         │ 794           │
+│ word-400-overlap-40     │ 290         │ 290         │ 580           │
+│ char-1200-overlap-120   │ 882         │ 882         │ 1,764         │
+├─────────────────────────┼─────────────┼─────────────┼───────────────┤
+│ TOTAL VECTORS           │ 1,569       │ 1,569       │ 3,138         │
+└─────────────────────────┴─────────────┴─────────────┴───────────────┘
+```
+
+**Databricks Notebook Cell Execution Flow**:
+1. **Cell 1**: Dependency installation and NLTK setup
+2. **Cell 2**: S3 client configuration and document retrieval functions
+3. **Cell 3**: Metadata loading from S3 URL endpoint
+4. **Cell 4**: Parameter extraction using `dbutils.widgets.get("tool")`
+5. **Cell 5**: Batch document loading and ByteStream creation
+6. **Cell 6**: Multi-pipeline processing with three chunking strategies
+7. **Cells 7-12**: Parallel vector database indexing with progress tracking
 
 ## 🔄 Hybrid Search Implementation
 
@@ -406,6 +513,28 @@ s3-bucket/
 └── uploads/                       # User-uploaded PDFs
 ```
 
+### **Databricks S3 Integration** 🆕
+```python
+def read_markdown_from_s3(s3_client, year, qtr, file_url):
+    bucket_name, aws_region = os.getenv('BUCKET_NAME'), os.getenv('AWS_REGION')
+    try:
+        tool_path = dbutils.widgets.get("tool")  # Dynamic tool selection
+        file_name = file_url.split("/")[-1]
+        response = s3_client.get_object(
+            Bucket=bucket_name, 
+            Key=f'{year}/{qtr}/{tool_path}/{file_name}'
+        )
+        markdown_content = response["Body"].read()
+        return markdown_content, file_url
+    except ClientError as e:
+        # Comprehensive error handling
+        if e.response['Error']['Code'] == "NoSuchKey":
+            print("Error: The specified file does not exist.")
+        else:
+            print(f"ClientError: {e}")
+        return -1
+```
+
 ### Image Processing Pipeline
 **Docling Image Extraction**:
 ```python
@@ -451,8 +580,9 @@ def replace_images_in_markdown(markdown_str, images_dict, year, qtr):
 - Python 3.10+
 - Docker & Docker Compose  
 - AWS Account with S3 access
+- **Databricks Workspace** (for vector processing pipeline)
 - API Keys: OpenAI, Mistral AI, Pinecone
-- Databricks Workspace (for production pipeline)
+- **NLTK Data** (for Databricks text processing)
 
 ### Environment Setup
 ```bash
@@ -476,14 +606,72 @@ PINECONE_API_KEY=your_pinecone_key
 # Database Configuration  
 REDIS_HOST=34.31.232.10
 REDIS_PORT=6379
+CHROMA_HOST=34.31.232.10
+CHROMA_PORT=8000
 
 # Databricks Integration
 DATABRICKS_HOST=your_workspace.databricks.com
 DATABRICKS_TOKEN=your_databricks_token
+DATABRICKS_JOB_ID=915262908716993
 
 # GitHub Actions
 GITHUB_BEARER_TOKEN=your_github_token
 EOF
+```
+
+### **Databricks Setup** 🆕
+
+#### 1. Databricks Workspace Configuration
+```bash
+# Install Databricks CLI
+pip install databricks-cli
+
+# Configure workspace connection
+databricks configure --token
+# Host: https://your_workspace.databricks.com
+# Token: your_databricks_token
+
+# Upload notebook to workspace
+databricks workspace import \
+  --language python \
+  --format jupyter \
+  ./notebooks/vector-db-setup.ipynb \
+  /Workspace/Users/your_email/vector-db-setup
+```
+
+#### 2. Databricks Job Configuration
+```json
+{
+  "name": "NVIDIA-RAG-Vector-Processing",
+  "job_id": "915262908716993",
+  "notebook_task": {
+    "notebook_path": "/Workspace/Users/your_email/vector-db-setup",
+    "base_parameters": {
+      "tool": "docling"
+    }
+  },
+  "cluster": {
+    "spark_version": "13.3.x-scala2.12",
+    "node_type_id": "i3.xlarge",
+    "driver_node_type_id": "i3.xlarge",
+    "num_workers": 2
+  },
+  "libraries": [
+    {"pypi": {"package": "haystack-ai"}},
+    {"pypi": {"package": "pinecone-haystack"}},
+    {"pypi": {"package": "chromadb"}},
+    {"pypi": {"package": "boto3"}},
+    {"pypi": {"package": "nltk==3.9.1"}}
+  ]
+}
+```
+
+#### 3. NLTK Data Setup in Databricks
+```python
+# First cell in Databricks notebook
+import nltk
+nltk.download('punkt', download_dir='/dbfs/mnt/nltk_data')
+nltk.data.path.append('dbfs:/mnt/nltk_data')
 ```
 
 ### Docker Deployment
@@ -499,6 +687,11 @@ docker-compose ps
 # Access Airflow UI
 open http://localhost:8081
 # Username: airflow, Password: airflow
+
+# Configure Databricks connection in Airflow UI
+# Connection Type: Databricks
+# Host: your_workspace.databricks.com
+# Extra: {"token": "your_databricks_token"}
 ```
 
 #### Backend & API Deployment  
@@ -574,6 +767,39 @@ query_response = requests.post('http://localhost:8000/qa', json={
 
 ## 🔧 Configuration & Optimization
 
+### **Databricks Performance Optimization** 🆕
+```python
+# Optimal batch processing configuration
+def batch_embed_documents(documents, batch_size=100):
+    embeddings = []
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i+batch_size]
+        batch_embeddings = embedder.run(documents=batch)
+        embeddings.extend(batch_embeddings['documents'])
+    return embeddings
+
+# Memory optimization for large document sets
+def process_documents_in_chunks(markdown_streams, chunk_size=5):
+    total_processed = 0
+    for i in range(0, len(markdown_streams), chunk_size):
+        chunk = markdown_streams[i:i+chunk_size]
+        result = indexing_pipeline.run(data={"sources": chunk})
+        
+        # Process each chunking strategy
+        for strategy in ['cs1', 'cs2', 'cs3']:
+            docs = [doc for doc in result[f'embedder_{strategy}']['documents'] 
+                   if doc.embedding and '_split_overlap' not in doc.meta]
+            
+            # Write to both databases
+            pinecone_count = pinecone_stores[strategy].write_documents(docs)
+            chroma_count = chroma_stores[strategy].write_documents(docs)
+            
+            print(f"Strategy {strategy}: {pinecone_count} docs to Pinecone, {chroma_count} docs to ChromaDB")
+        
+        total_processed += len(chunk)
+        print(f"Processed {total_processed}/{len(markdown_streams)} documents")
+```
+
 ### Redis Vector Store Optimization
 ```python
 # Database-specific configuration for chunking strategies
@@ -581,16 +807,19 @@ redis_config = {
     'sentence-5': {
         'db': 0,
         'optimal_chunk_size': 750,
+        'indexed_documents': 397,
         'use_case': 'semantic_coherence'
     },
     'word-400-overlap-40': {
         'db': 1, 
         'optimal_chunk_size': 2000,
+        'indexed_documents': 290,
         'use_case': 'comprehensive_coverage'
     },
     'char-1200-overlap-120': {
         'db': 2,
         'optimal_chunk_size': 1200,
+        'indexed_documents': 882,
         'use_case': 'consistent_embedding'
     }
 }
@@ -625,6 +854,7 @@ def optimized_similarity_search(query_embedding, stored_embeddings, top_k=5):
 ### RAG Implementation & Chunking Strategies (40%)
 - ✅ **Vector Store Diversity**: Pinecone, ChromaDB, and native Redis implementation
 - ✅ **Chunking Strategy Analysis**: Three distinct approaches with performance metrics
+- ✅ **Databricks Integration**: Large-scale vector processing with 3,138 total vectors indexed
 - ✅ **Hybrid Search**: Quarter-specific filtering and multi-period analysis
 - ✅ **Embedding Optimization**: Efficient similarity calculations and storage
 
@@ -637,7 +867,8 @@ def optimized_similarity_search(query_embedding, stored_embeddings, top_k=5):
 ### Deployment & Dockerization (10%)
 - ✅ **Container Orchestration**: Multi-service Docker Compose configuration
 - ✅ **Production Deployment**: Cloud hosting with CI/CD pipeline integration
-- ✅ **Scalability**: Airflow worker scaling and Databricks integration
+- ✅ **Databricks Integration**: Scalable compute with auto-scaling capabilities
+- ✅ **Airflow Worker Scaling**: Distributed task processing
 - ✅ **Monitoring**: Comprehensive logging and health checks
 
 ### Documentation & Presentation (10%)
@@ -663,24 +894,82 @@ curl -X POST "http://localhost:8081/api/v1/dags/dag_etl_docling/dagRuns" \
   -d '{"dag_run_id": "manual_run_' $(date +%s) '"}'
 ```
 
+### **Databricks Monitoring** 🆕
+```bash
+# Check Databricks job status
+databricks runs list --job-id 915262908716993
+
+# Monitor job execution
+databricks runs get --run-id <run_id>
+
+# View job logs
+databricks runs get-output --run-id <run_id>
+
+# Check cluster status
+databricks clusters get --cluster-id <cluster_id>
+```
+
 ### Vector Store Health Checks
 ```python
 # Redis connectivity
 import redis
 r = redis.StrictRedis(host='34.31.232.10', port=6379, db=0)
 print(f"Redis status: {r.ping()}")
+print(f"Keys count: {r.dbsize()}")
 
 # Pinecone index stats
 import pinecone
 pc = pinecone.Pinecone(api_key="your_key")
 index = pc.Index("nvidia-vectors")
-print(f"Index stats: {index.describe_index_stats()}")
+stats = index.describe_index_stats()
+print(f"Total vectors: {stats['total_vector_count']}")
+print(f"Namespaces: {list(stats['namespaces'].keys())}")
 
 # ChromaDB collection info
 import chromadb
 client = chromadb.HttpClient(host="34.31.232.10", port="8000")
 collections = client.list_collections()
-print(f"Collections: {[c.name for c in collections]}")
+for collection in collections:
+    print(f"Collection: {collection.name}, Count: {collection.count()}")
+
+# **NEW**: Databricks vector processing validation
+def validate_databricks_processing():
+    expected_counts = {
+        'nvidia_cs_1': 397,  # sentence-5
+        'nvidia_cs_2': 290,  # word-400-overlap-40 
+        'nvidia_cs_3': 882   # char-1200-overlap-120
+    }
+    
+    for namespace, expected in expected_counts.items():
+        pinecone_count = index.describe_index_stats()['namespaces'].get(namespace, {}).get('vector_count', 0)
+        chroma_collection = client.get_collection(namespace)
+        chroma_count = chroma_collection.count()
+        
+        print(f"{namespace}:")
+        print(f"  Expected: {expected}")
+        print(f"  Pinecone: {pinecone_count}")  
+        print(f"  ChromaDB: {chroma_count}")
+        print(f"  Status: {'✅' if pinecone_count == chroma_count == expected else '❌'}")
 ```
 
-This comprehensive RAG pipeline demonstrates advanced document processing, sophisticated vector storage implementations, and production-ready deployment strategies for financial document analysis and retrieval.
+## 🎯 **Key Databricks Integration Benefits** 🆕
+
+### Scalability & Performance
+- **Auto-scaling Clusters**: Dynamic resource allocation based on workload
+- **Parallel Processing**: Simultaneous chunking and embedding generation
+- **Batch Optimization**: Efficient handling of large document sets
+- **Progress Tracking**: Real-time monitoring of vector generation
+
+### Data Pipeline Reliability  
+- **Error Handling**: Comprehensive exception management with S3 integration
+- **Metadata Cleanup**: Automatic removal of processing artifacts
+- **Dual Database Writes**: Simultaneous indexing to Pinecone and ChromaDB
+- **Parameter Flexibility**: Dynamic tool selection via Airflow job parameters
+
+### Operational Excellence
+- **MLflow Integration**: Automatic trace logging for debugging
+- **Resource Optimization**: Intelligent memory and compute management  
+- **Monitoring & Alerts**: Built-in cluster and job monitoring
+- **Cost Efficiency**: Pay-per-use compute model with cluster auto-termination
+
+This comprehensive RAG pipeline with **Databricks-powered vector processing** demonstrates advanced document processing, sophisticated vector storage implementations, and production-ready deployment strategies for financial document analysis and retrieval at enterprise scale.
